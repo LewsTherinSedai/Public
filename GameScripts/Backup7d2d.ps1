@@ -11,7 +11,8 @@
 By Default, it will use your Documents folder and create a folder called 7d2dBackups
 By Default, it will use Gulaso Territory because, that's what I use - sorry, I'm lazy
 Start > Run > %userProfile%\AppData\Roaming\7DaysToDie\Saves is the normal path for the 'root' saves, what save you're playing off of varies
-This also assumes you have 7zip installed - if not, a default install from https://ninite.com/7zip/ will be this path 99.9% of the time
+This also assumes you have 7zip installed - if not, a default install from https://ninite.com/7zip/ will be this path 99.9% of the time 
+- this script does NOT automatically install 7zip -
 
 --Examples--
 You can also automate this with a basic switch:
