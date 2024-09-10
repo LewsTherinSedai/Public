@@ -1,32 +1,47 @@
-<# ====================================================
-  |  7D2D Powershell Backup Script                   |
-  | Created by: TayschrennSedai                      |
-  | Contact: github.com/LewsTherinSedai              |
-  | Revision: 1.1                                    |
-  ====================================================
+<# 
+====================================================
+|  7D2D Powershell Backup Script                   |
+| Created by: TayschrennSedai                      |
+| Contact: github.com/LewsTherinSedai              |
+| Revision: 1.2                                    |
+====================================================
 
+.AUTHOR
+    LewsTherinSedai on Git
 
+.DATE
+    2024-09-10
 
---Define paths for your game--
-By Default, it will use your Documents folder and create a folder called 7d2dBackups
-By Default, it will use Gulaso Territory because, that's what I use - sorry, I'm lazy
-Start > Run > %userProfile%\AppData\Roaming\7DaysToDie\Saves is the normal path for the 'root' saves, what save you're playing off of varies
-This also assumes you have 7zip installed - if not, a default install from https://ninite.com/7zip/ will be this path 99.9% of the time 
-- this script does NOT automatically install 7zip -
+.VERSION
+    1.2
 
---Examples--
-You can also automate this with a basic switch:
+.LICENSE
+    GPL v3.0
+
+.PARAMETER backup
+    Default is "Default" but can also use ALL
+
+.PARAMETER type
+    Probably not needed, technically - but you can also use -backup -type ALL
+
+.EXAMPLE
+     You can also automate this with a basic switch:
 .\Backup7d2d.ps1 -backup 
-(By default this option will backup the default save folder only)
+     (By default this option will backup the default save folder only)
 .\Backup7d2d.ps1 -backup ALL
-(This will backup ALL the save folders)
+     (This will backup ALL the save folders)
 
---Notes--
-I might improve this script more in the future, I mostly just built it to be lazy
-Could add some logic to allow passing source/destinations, but at that point you could just use robocopy or something.
 
+.REQUIREMENTS
+    - This also assumes you have 7zip installed - if not, a default install from https://ninite.com/7zip/ will be this path 99.9% of the time 
+
+.NOTES
+    - I might improve this script more in the future, I mostly just built it to be lazy
+
+.FUTUREWORK
+    - Linux support?
+    - Could add some logic to allow passing source/destinations, but at that point you could just use robocopy or something
 #>
-
 # Define parameters for automation
 param (
     [switch]$backup,
