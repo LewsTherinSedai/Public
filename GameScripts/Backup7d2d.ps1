@@ -103,6 +103,54 @@ function Backup-Folder {
     }
 }
 
+# Function to restore a specific folder from a .7z file
+function Restore-Folder {
+    param (
+        [string]$restorePath,
+        [string]$restoreFile
+    )
+
+    # Backup the folder before restoring (PreRestore backup)
+    Backup-Folder -folderToBackup $restorePath -backupType "PreRestore"
+
+    # Extract the selected .7z file
+    $arguments = "x `"$restoreFile`" -o`"$restorePath`" -aoa"
+    Write-Host "Executing 7-Zip command: $sevenZipPath $arguments"
+    Start-Process -FilePath $sevenZipPath -ArgumentList $arguments -NoNewWindow -Wait
+
+    Write-Host "Restore completed from $restoreFile"
+}
+
+# Function to list and select backups
+function Select-Backup {
+    param (
+        [string]$backupPattern,
+        [int]$maxResults
+    )
+
+    # Get a list of backup files matching the pattern and sort by creation date
+    $backupFiles = Get-ChildItem -Path $BackupPath -Filter "$backupPattern*.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First $maxResults
+
+    if (-Not $backupFiles) {
+        Write-Error "No backups found matching the pattern: $backupPattern"
+        return $null
+    }
+
+    # Display the backups for the user to select
+    Write-Host "Select a backup to restore:"
+    for ($i = 0; $i -lt $backupFiles.Count; $i++) {
+        Write-Host "$($i + 1). $($backupFiles[$i].Name)"
+    }
+
+    $selection = Read-Host "Please select a backup (1-$($backupFiles.Count))"
+    if ($selection -match '^\d+$' -and [int]$selection -ge 1 -and [int]$selection -le $backupFiles.Count) {
+        return $backupFiles[[int]$selection - 1].FullName
+    } else {
+        Write-Host "Invalid selection."
+        return $null
+    }
+}
+
 # Check for command-line switches
 if ($backup) {
     if ($type -eq "Default") {
