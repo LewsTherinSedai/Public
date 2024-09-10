@@ -35,8 +35,8 @@ param (
 
 # Define paths
 $userProfile = [System.Environment]::GetFolderPath("UserProfile")
-$SaveGameFolder = "$userProfile\AppData\Roaming\7DaysToDieTest\Saves\Gulaso Territory"  # Example save path
-$AllSavesFolder = "$userProfile\AppData\Roaming\7DaysToDieTest\Saves"
+$SaveGameFolder = "$userProfile\AppData\Roaming\7DaysToDie\Saves\Gulaso Territory"  # Example save path
+$AllSavesFolder = "$userProfile\AppData\Roaming\7DaysToDie\Saves"
 $DocumentsFolder = [System.Environment]::GetFolderPath("MyDocuments")
 $BackupPath = "$DocumentsFolder\7d2dBackups"
 $sevenZipPath = "C:\Program Files\7-Zip\7z.exe"  # Adjust this path if 7-Zip is installed elsewhere
