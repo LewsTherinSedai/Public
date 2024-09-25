@@ -1,3 +1,34 @@
+<# 
+====================================================
+|  EoP AllowAll domain Powershell  Script          |
+| Created by: TayschrennSedai                      |
+| Contact: github.com/LewsTherinSedai              |
+| Revision: 1.1                                    |
+====================================================
+
+.AUTHOR
+    LewsTherinSedai on Git
+
+.DATE
+    2024-09-24
+.DESCRIPTION
+This script connects to Exchange Online and looks over content filters for 'allowed all' domains and reports it to - by default 
+c:\temp\ in a csv
+It will include in the csv which policy the domain(s) are listed in, and if you want you can change Unique in the variables to
+$True and it will remove duplicates (handy if you're just converting these to a different format)
+It will then go through and check the domains for spf/dmarc/dkim on each domain.
+.INPUTS
+There are static variables you need to adjust
+.NOTES
+    GPL v3.0
+
+    REQUIREMENTS
+    - Didn't build in logic to ensure c:\temp exists...so, make it
+    - It will install modules if you don't have them
+    - Uses modern auth so, don't run it on a CLI only machine
+
+#>
+
 # Define customizable variables
 $outputPath = "C:\temp\CombinedDomainRecords.csv"
 $userPrincipalName = "UPN@fabrikom.com"
