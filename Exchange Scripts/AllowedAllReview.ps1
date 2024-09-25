@@ -26,7 +26,9 @@ There are static variables you need to adjust
     - Didn't build in logic to ensure c:\temp exists...so, make it
     - It will install modules if you don't have them
     - Uses modern auth so, don't run it on a CLI only machine
-
+.FutureWork
+I plan on adding a switch/option to also automatically create an Exchange Rule for the validated domains that checks SPF/DKIM
+and lowers the SCL to a user defined value, and then remove these domains from EoP per Microsoft's Best Practices
 #>
 
 # Define customizable variables
