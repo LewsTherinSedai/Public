@@ -1,0 +1,75 @@
+
+# --- Settings ---
+$serverIP        = '10.0.0.42'
+$credPath        = 'C:\Scripts\ServerScripts\wincreds.xml'
+$waitSeconds     = 120  # 2 minutes
+
+# --- Load credential ---
+if (-not (Test-Path $credPath)) { throw "Credential file not found: $credPath" }
+$cred = Import-Clixml -Path $credPath
+
+Write-Host "Initiating remote shutdown on ${serverIP}..."
+
+# Try Stop-Computer first (WSMan/WMI), then fall back to CIM/DCOM if needed
+$shutdownSucceeded = $false
+try {
+    Stop-Computer -ComputerName $serverIP -Credential $cred -Force -ErrorAction Stop
+    $shutdownSucceeded = $true
+    Write-Host "Stop-Computer request sent successfully."
+} catch {
+    Write-Warning ("Stop-Computer failed: {0} — attempting CIM/DCOM fallback..." -f $_.Exception.Message)
+    try {
+        $opt  = New-CimSessionOption -Protocol Dcom
+        $sess = New-CimSession -ComputerName $serverIP -Credential $cred -SessionOption $opt
+        # Win32Shutdown flags: 1=Shutdown, 4=Force -> 5=Force + Shutdown
+        $null = Invoke-CimMethod -CimSession $sess -ClassName Win32_OperatingSystem -MethodName Win32Shutdown -Arguments @{ Flags = 5 }
+        Remove-CimSession -CimSession $sess
+        $shutdownSucceeded = $true
+        Write-Host "CIM/DCOM shutdown request sent successfully."
+    } catch {
+        throw ("All shutdown methods failed for ${serverIP}: {0}" -f $_.Exception.Message)
+    }
+}
+
+Write-Host "Waiting ${waitSeconds} seconds before iDRAC command..."
+Start-Sleep -Seconds $waitSeconds
+
+
+
+# Ignore SSL certificate validation errors
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+
+# Define log file path
+$logPath = "$(Split-Path -Parent $MyInvocation.MyCommand.Path)\shutdown_idrac_script_log.txt"
+
+# Start logging
+Start-Transcript -Path $logPath -Append
+
+try {
+    # Import Redfish PowerShell module
+    if (-not (Get-Module -Name Set-PowerControlREDFISH -ListAvailable)) {
+        Import-Module -Name IdracRedfishSupport -ErrorAction Stop
+    }
+
+    # iDRAC details
+    $idracIP = "10.0.0.157"
+    $credentialFile = "C:\Scripts\ServerScripts\EncryptedCredential.xml"
+
+    # Import the encrypted credential
+    $credential = Import-Clixml -Path $credentialFile
+    $username = $credential.UserName
+    $securePassword = $credential.Password
+    $password = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword))
+
+    # Perform a graceful shutdown using the Redfish PowerShell module
+    Set-PowerControlREDFISH -idrac_ip $idracIP -idrac_username $username -idrac_password $password -power_request_value "GracefulShutdown" -Verbose
+
+    Write-Host "Server shutdown initiated successfully."
+} catch {
+    # Log the error
+    Write-Error $_.Exception.Message
+    Write-Host "An error occurred. Check the log file at $logPath for more details."
+} finally {
+    # End logging
+    Stop-Transcript
+}
