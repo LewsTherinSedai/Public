@@ -229,7 +229,11 @@ log_ok() {
   if ! $DRY_RUN; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') OK: $msg" >> "$LOG_FILE"
   fi
-  printf "%b\n" "${GREEN} [OK] ${msg}${RESET}"
+  if [[ -n "${ANIM_PID:-}" ]]; then
+    echo "[OK] $msg" > "$STATUS_FILE"
+  else
+    printf "%b\n" "${GREEN} [OK] ${msg}${RESET}"
+  fi
 }
 
 log_warn() {
@@ -237,7 +241,11 @@ log_warn() {
   if ! $DRY_RUN; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') WARN: $msg" >> "$LOG_FILE"
   fi
-  printf "%b\n" "${YELLOW} [WARN] ${msg}${RESET}"
+  if [[ -n "${ANIM_PID:-}" ]]; then
+    echo "[WARN] $msg" > "$STATUS_FILE"
+  else
+    printf "%b\n" "${YELLOW} [WARN] ${msg}${RESET}"
+  fi
 }
 
 log_err() {
@@ -245,7 +253,11 @@ log_err() {
   if ! $DRY_RUN; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: $msg" >> "$LOG_FILE"
   fi
-  printf "%b\n" "${RED} [ERROR] ${msg}${RESET}"
+  if [[ -n "${ANIM_PID:-}" ]]; then
+    echo "[ERROR] $msg" > "$STATUS_FILE"
+  else
+    printf "%b\n" "${RED} [ERROR] ${msg}${RESET}"
+  fi
 }
 
 # ---------- Confirmation ----------
@@ -525,20 +537,37 @@ for node in "${NODES[@]}"; do
     log "  reboot if /var/run/reboot-required exists"
   else
     ssh_rc=0
-    ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s <<'REMOTE' || ssh_rc=$?
-      set -e
-      export DEBIAN_FRONTEND=noninteractive
-      export NEEDRESTART_MODE=l
-      apt-get update
-      yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
-                       -o Dpkg::Options::="--force-confold" dist-upgrade
-      if [ -f /var/run/reboot-required ]; then
-        echo "Reboot required by: $(cat /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
-        reboot
-      else
-        echo "No reboot required; skipping reboot for this node"
-      fi
+    if $LLAMA; then
+      ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s >>"$LOG_FILE" 2>&1 <<'REMOTE' || ssh_rc=$?
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=l
+        apt-get update
+        yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
+                         -o Dpkg::Options::="--force-confold" dist-upgrade
+        if [ -f /var/run/reboot-required ]; then
+          echo "Reboot required by: $(cat /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
+          reboot
+        else
+          echo "No reboot required; skipping reboot for this node"
+        fi
 REMOTE
+    else
+      ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s <<'REMOTE' || ssh_rc=$?
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=l
+        apt-get update
+        yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
+                         -o Dpkg::Options::="--force-confold" dist-upgrade
+        if [ -f /var/run/reboot-required ]; then
+          echo "Reboot required by: $(cat /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
+          reboot
+        else
+          echo "No reboot required; skipping reboot for this node"
+        fi
+REMOTE
+    fi
     log "Update command sent to ${node} (ssh exit code: ${ssh_rc})"
   fi
 
@@ -563,14 +592,25 @@ REMOTE
   else
     wait_for_node "$node" || { log_err "${node} not reachable for post-reboot check; aborting"; exit 1; }
     log "Checking for remaining updates on ${node}"
-    ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s <<'CHECK'
-      set -e
-      export DEBIAN_FRONTEND=noninteractive
-      export NEEDRESTART_MODE=l
-      apt-get update
-      yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
-                       -o Dpkg::Options::="--force-confold" dist-upgrade
+    if $LLAMA; then
+      ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s >>"$LOG_FILE" 2>&1 <<'CHECK'
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=l
+        apt-get update
+        yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
+                         -o Dpkg::Options::="--force-confold" dist-upgrade
 CHECK
+    else
+      ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s <<'CHECK'
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=l
+        apt-get update
+        yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
+                         -o Dpkg::Options::="--force-confold" dist-upgrade
+CHECK
+    fi
   fi
 
   # -- Unset maintenance flags --
