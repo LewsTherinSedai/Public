@@ -30,6 +30,7 @@ FLAGS=(noout norebalance norecover)
 FLAGS_SET=false
 STATUS_FILE=""
 ANIM_PID=""
+ALT_SCREEN=false
 
 # ---------- Colors ----------
 RESET="\e[0m"
@@ -45,8 +46,31 @@ if [[ ! -t 1 ]]; then
   RESET="" RED="" GREEN="" YELLOW="" CYAN="" MAGENTA="" WHITE="" BOLD=""
 fi
 
+# ---------- Alternate screen helpers ----------
+enter_alt_screen() {
+  tput smcup 2>/dev/null || printf '\e[?1049h'
+  tput clear 2>/dev/null || printf '\e[2J\e[H'
+  tput civis 2>/dev/null || true
+  ALT_SCREEN=true
+}
+
+leave_alt_screen() {
+  if $ALT_SCREEN; then
+    tput cnorm 2>/dev/null || true
+    tput clear 2>/dev/null || printf '\e[2J\e[H'
+    tput rmcup 2>/dev/null || printf '\e[?1049l'
+    ALT_SCREEN=false
+  fi
+}
+
 # ---------- Cleanup (restores flags on crash) ----------
 cleanup() {
+  if [[ -n "${ANIM_PID:-}" ]]; then
+    kill "$ANIM_PID" 2>/dev/null || true
+    wait "$ANIM_PID" 2>/dev/null || true
+    ANIM_PID=""
+  fi
+  leave_alt_screen
   if $FLAGS_SET && ! $DRY_RUN; then
     echo ""
     echo "WARNING: Restoring Ceph maintenance flags due to unexpected exit..."
@@ -55,12 +79,6 @@ cleanup() {
     done
     echo "Flags restored. Verify cluster health: ceph -s"
   fi
-  if [[ -n "${ANIM_PID:-}" ]]; then
-    kill "$ANIM_PID" 2>/dev/null || true
-    wait "$ANIM_PID" 2>/dev/null || true
-    ANIM_PID=""
-  fi
-  printf '\e[r' 2>/dev/null || true
   [[ -n "${STATUS_FILE:-}" ]] && rm -f "$STATUS_FILE"
   tput cnorm 2>/dev/null || true
   echo
@@ -134,25 +152,28 @@ draw_llama_banner() {
   printf "%b\n" "${RESET}"
 }
 
-# ---------- Llama walking-in-place animation (background) ----------
+# ---------- Llama walking-in-place animation (alternate screen) ----------
+# Draws a fixed dashboard at absolute rows on the alternate screen buffer.
+# Never scrolls (no newlines, never writes the bottom-right cell), so the
+# llama stays put and leaves nothing behind in the scrollback.
 llama_walk() {
   local status_file="$1"
   local dry_run="$2"
   local frame=0
-  local cols
-  cols=$(tput cols 2>/dev/null || echo 80)
+  local mode_tag="DRY-RUN"
+  [[ "$dry_run" == "false" ]] && mode_tag="LIVE"
 
   tput civis 2>/dev/null || true
 
   while true; do
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 80)
+
     local msg
     msg=$(cat "$status_file" 2>/dev/null || echo "...")
-    if (( ${#msg} > cols - 15 )); then
-      msg="${msg:0:$((cols - 18))}..."
+    if (( ${#msg} > cols - 12 )); then
+      msg="${msg:0:$((cols - 15))}..."
     fi
-
-    local mode_tag="DRY-RUN"
-    [[ "$dry_run" == "false" ]] && mode_tag="LIVE"
 
     local feet
     if (( frame % 2 == 0 )); then
@@ -161,37 +182,27 @@ llama_walk() {
       feet='\ /\ /'
     fi
 
-    local bottom
-    bottom=$(tput lines 2>/dev/null || echo 24)
+    tput cup 0 0 2>/dev/null;  printf '\e[K%b' "${BOLD}${YELLOW}+======================================+${RESET}"
+    tput cup 1 0 2>/dev/null;  printf '\e[K%b' "${BOLD}${YELLOW}|    Ceph Rolling OS Upgrade           |${RESET}"
+    tput cup 2 0 2>/dev/null;  printf '\e[K%b' "${BOLD}${YELLOW}+======================================+${RESET}"
+    tput cup 4 0 2>/dev/null;  printf '\e[K  %bMode: %s%b' "$WHITE" "$mode_tag" "$RESET"
 
-    tput sc 2>/dev/null || printf '\e7'
+    tput cup 6 0 2>/dev/null;  printf '\e[K%b' "${CYAN}                __--_--_-${RESET}"
+    tput cup 7 0 2>/dev/null;  printf '\e[K%b' "${CYAN}               ( I wish I  )${RESET}"
+    tput cup 8 0 2>/dev/null;  printf '\e[K%b' "${CYAN}              ( were a real )${RESET}"
+    tput cup 9 0 2>/dev/null;  printf '\e[K%b' "${CYAN}              (    llama   )${RESET}"
+    tput cup 10 0 2>/dev/null; printf '\e[K%b' "${CYAN}               ( in Peru! )${RESET}"
+    tput cup 11 0 2>/dev/null; printf '\e[K%b' "${CYAN}              o (__--_--_)${RESET}"
+    tput cup 12 0 2>/dev/null; printf '\e[K%b' "${CYAN}           , o${RESET}"
+    tput cup 13 0 2>/dev/null; printf '\e[K%b' "${MAGENTA}          ~)${RESET}"
+    tput cup 14 0 2>/dev/null; printf '\e[K%b' "${MAGENTA}           (_---;${RESET}"
+    tput cup 15 0 2>/dev/null; printf '\e[K%b' "${MAGENTA}              /|~|\\\\${RESET}"
+    tput cup 16 0 2>/dev/null; printf '\e[K%b' "${MAGENTA}              ${feet}${RESET}"
 
-    tput cup $((bottom - 12)) 0 2>/dev/null
-    printf "\e[K ${CYAN}              __--_--_-${RESET}"
-    tput cup $((bottom - 11)) 0 2>/dev/null
-    printf "\e[K ${CYAN}             ( I wish I  )${RESET}"
-    tput cup $((bottom - 10)) 0 2>/dev/null
-    printf "\e[K ${CYAN}            ( were a real )${RESET}"
-    tput cup $((bottom - 9)) 0 2>/dev/null
-    printf "\e[K ${CYAN}            (    llama   )${RESET}"
-    tput cup $((bottom - 8)) 0 2>/dev/null
-    printf "\e[K ${CYAN}             ( in Peru! )${RESET}"
-    tput cup $((bottom - 7)) 0 2>/dev/null
-    printf "\e[K ${CYAN}            o (__--_--_)${RESET}"
-    tput cup $((bottom - 6)) 0 2>/dev/null
-    printf "\e[K ${CYAN}         , o${RESET}"
-    tput cup $((bottom - 5)) 0 2>/dev/null
-    printf "\e[K ${MAGENTA}        ~)${RESET}"
-    tput cup $((bottom - 4)) 0 2>/dev/null
-    printf "\e[K ${MAGENTA}         (_---;${RESET}"
-    tput cup $((bottom - 3)) 0 2>/dev/null
-    printf "\e[K ${MAGENTA}            /|~|\\\\${RESET}"
-    tput cup $((bottom - 2)) 0 2>/dev/null
-    printf "\e[K ${MAGENTA}            %s${RESET}" "$feet"
-    tput cup $((bottom - 1)) 0 2>/dev/null
-    printf "\e[K ${WHITE}[%s]${RESET} %s" "$mode_tag" "$msg"
+    tput cup 18 0 2>/dev/null; printf '\e[K  %b[%s]%b %s' "$WHITE" "$mode_tag" "$RESET" "$msg"
 
-    tput rc 2>/dev/null || printf '\e8'
+    # Park cursor on a clear line below the dashboard (used for prompts too)
+    tput cup 19 0 2>/dev/null; printf '\e[K'
 
     frame=$((frame + 1))
     sleep 0.5
@@ -255,8 +266,14 @@ confirm() {
   if [[ -n "${ANIM_PID:-}" ]]; then
     kill -STOP "$ANIM_PID" 2>/dev/null || true
   fi
+  tput cnorm 2>/dev/null || true
+  if $ALT_SCREEN; then
+    tput cup 19 0 2>/dev/null || true
+    printf '\e[K'
+  fi
   printf "%b" "${YELLOW}$1 [y/N]: ${RESET}"
   read -r response
+  tput civis 2>/dev/null || true
   if [[ -n "${ANIM_PID:-}" ]]; then
     kill -CONT "$ANIM_PID" 2>/dev/null || true
   fi
@@ -444,11 +461,6 @@ if ! $DRY_RUN; then
 fi
 echo
 
-if $LLAMA; then
-  draw_llama_banner
-  echo
-fi
-
 # Pre-flight: SSH connectivity
 log "Pre-flight: checking SSH connectivity..."
 ssh_ok=true
@@ -480,15 +492,9 @@ if ! $DRY_RUN; then
   fi
 fi
 
-# Start llama animation
+# Start llama animation on an alternate screen buffer (stable canvas)
 if $LLAMA; then
-  # Reserve the bottom 13 rows for the llama by setting a scroll region.
-  # Main output scrolls only in the top portion; the llama area stays fixed.
-  llama_term_height=$(tput lines 2>/dev/null || echo 24)
-  llama_scroll_end=$((llama_term_height - 13))
-  printf '\e[1;%dr' "$llama_scroll_end"
-  tput cup "$((llama_scroll_end - 1))" 0 2>/dev/null || true
-
+  enter_alt_screen
   llama_walk "$STATUS_FILE" "$DRY_RUN" &
   ANIM_PID=$!
 fi
@@ -618,22 +624,13 @@ CHECK
   log_ok "Completed update of ${node} (${current}/${total})"
 done
 
-# -- Stop animation and restore terminal --
+# -- Stop animation and restore normal screen --
 if [[ -n "${ANIM_PID:-}" ]]; then
   kill "$ANIM_PID" 2>/dev/null || true
   wait "$ANIM_PID" 2>/dev/null || true
   ANIM_PID=""
-  tput cnorm 2>/dev/null || true
-  # Clear the llama area
-  anim_bottom=$(tput lines 2>/dev/null || echo 24)
-  for i in $(seq 1 12); do
-    tput cup $((anim_bottom - i)) 0 2>/dev/null || true
-    printf "\e[K"
-  done
-  # Restore full scroll region
-  printf '\e[r' 2>/dev/null || true
-  tput cup "$((anim_bottom - 13))" 0 2>/dev/null || true
 fi
+leave_alt_screen
 
 echo
 printf "%b\n" "${BOLD}${GREEN}+======================================+${RESET}"
