@@ -5,6 +5,10 @@ set -uo pipefail
 # Ceph Rolling OS Upgrade
 # Run in a 'screen' session on a Ceph gateway node.
 #
+# Author: LewsTherinSedai
+# https://github.com/LewsTherinSedai/Public
+# SPDX-License-Identifier: GPL-3.0-only
+#
 # Merges production-proven rolling upgrade logic with
 # CLI features (dry-run, llama animation, interactive
 # confirmations, configurable nodes).
