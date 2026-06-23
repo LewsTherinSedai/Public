@@ -134,17 +134,13 @@ draw_llama_banner() {
   printf "%b\n" "${RESET}"
 }
 
-# ---------- Llama walking animation (background) ----------
+# ---------- Llama walking-in-place animation (background) ----------
 llama_walk() {
   local status_file="$1"
   local dry_run="$2"
   local frame=0
-  local pos=1
-  local direction=1
   local cols
   cols=$(tput cols 2>/dev/null || echo 80)
-  local max_pos=$(( cols - 30 ))
-  (( max_pos < 10 )) && max_pos=10
 
   tput civis 2>/dev/null || true
 
@@ -157,9 +153,6 @@ llama_walk() {
 
     local mode_tag="DRY-RUN"
     [[ "$dry_run" == "false" ]] && mode_tag="LIVE"
-
-    local padding=""
-    printf -v padding "%*s" "$pos" ""
 
     local feet
     if (( frame % 2 == 0 )); then
@@ -174,37 +167,33 @@ llama_walk() {
     tput sc 2>/dev/null || printf '\e7'
 
     tput cup $((bottom - 12)) 0 2>/dev/null
-    printf "\e[K%s${CYAN}              __--_--_-${RESET}" "$padding"
+    printf "\e[K ${CYAN}              __--_--_-${RESET}"
     tput cup $((bottom - 11)) 0 2>/dev/null
-    printf "\e[K%s${CYAN}             ( I wish I  )${RESET}" "$padding"
+    printf "\e[K ${CYAN}             ( I wish I  )${RESET}"
     tput cup $((bottom - 10)) 0 2>/dev/null
-    printf "\e[K%s${CYAN}            ( were a real )${RESET}" "$padding"
+    printf "\e[K ${CYAN}            ( were a real )${RESET}"
     tput cup $((bottom - 9)) 0 2>/dev/null
-    printf "\e[K%s${CYAN}            (    llama   )${RESET}" "$padding"
+    printf "\e[K ${CYAN}            (    llama   )${RESET}"
     tput cup $((bottom - 8)) 0 2>/dev/null
-    printf "\e[K%s${CYAN}             ( in Peru! )${RESET}" "$padding"
+    printf "\e[K ${CYAN}             ( in Peru! )${RESET}"
     tput cup $((bottom - 7)) 0 2>/dev/null
-    printf "\e[K%s${CYAN}            o (__--_--_)${RESET}" "$padding"
+    printf "\e[K ${CYAN}            o (__--_--_)${RESET}"
     tput cup $((bottom - 6)) 0 2>/dev/null
-    printf "\e[K%s${CYAN}         , o${RESET}" "$padding"
+    printf "\e[K ${CYAN}         , o${RESET}"
     tput cup $((bottom - 5)) 0 2>/dev/null
-    printf "\e[K%s${MAGENTA}        ~)${RESET}" "$padding"
+    printf "\e[K ${MAGENTA}        ~)${RESET}"
     tput cup $((bottom - 4)) 0 2>/dev/null
-    printf "\e[K%s${MAGENTA}         (_---;${RESET}" "$padding"
+    printf "\e[K ${MAGENTA}         (_---;${RESET}"
     tput cup $((bottom - 3)) 0 2>/dev/null
-    printf "\e[K%s${MAGENTA}            /|~|\\\\${RESET}" "$padding"
+    printf "\e[K ${MAGENTA}            /|~|\\\\${RESET}"
     tput cup $((bottom - 2)) 0 2>/dev/null
-    printf "\e[K%s${MAGENTA}            %s${RESET}" "$padding" "$feet"
+    printf "\e[K ${MAGENTA}            %s${RESET}" "$feet"
     tput cup $((bottom - 1)) 0 2>/dev/null
     printf "\e[K ${WHITE}[%s]${RESET} %s" "$mode_tag" "$msg"
 
     tput rc 2>/dev/null || printf '\e8'
 
     frame=$((frame + 1))
-    pos=$((pos + direction * 2))
-    if (( pos >= max_pos )); then direction=-1; fi
-    if (( pos <= 1 )); then direction=1; fi
-
     sleep 0.5
   done
 }
