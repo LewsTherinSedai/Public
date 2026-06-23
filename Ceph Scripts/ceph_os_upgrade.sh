@@ -60,6 +60,7 @@ cleanup() {
     wait "$ANIM_PID" 2>/dev/null || true
     ANIM_PID=""
   fi
+  printf '\e[r' 2>/dev/null || true
   [[ -n "${STATUS_FILE:-}" ]] && rm -f "$STATUS_FILE"
   tput cnorm 2>/dev/null || true
   echo
@@ -353,6 +354,8 @@ wait_for_osds() {
 }
 
 # ---------- Wait for consecutive HEALTH_OK (JSON via python3) ----------
+# Treats HEALTH_WARN as OK if the only warnings are PG_NOT_SCRUBBED
+# and/or PG_NOT_DEEP_SCRUBBED, since those are benign during rolling upgrades.
 wait_for_health() {
   local required_ok=${1:-3}
   local consecutive_ok=0
@@ -364,21 +367,45 @@ wait_for_health() {
   fi
 
   while true; do
-    local health_status=""
-    health_status=$(ceph status -f json 2>/dev/null | \
-      python3 -c "import sys,json; print(json.load(sys.stdin)['health']['status'])" 2>/dev/null) || health_status="UNKNOWN"
-    if [[ "$health_status" == "HEALTH_OK" ]]; then
+    local health_result=""
+    health_result=$(ceph status -f json 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+status = d['health']['status']
+if status == 'HEALTH_OK':
+    print('OK')
+elif status == 'HEALTH_WARN':
+    checks = set(d['health'].get('checks', {}).keys())
+    benign = {'PG_NOT_DEEP_SCRUBBED', 'PG_NOT_SCRUBBED'}
+    if checks and checks.issubset(benign):
+        print('OK_SCRUB_WARN:' + ','.join(sorted(checks)))
+    else:
+        other = checks - benign
+        print('WARN:' + ','.join(sorted(other)))
+else:
+    print(status)
+" 2>/dev/null) || health_result="UNKNOWN"
+
+    if [[ "$health_result" == "OK" ]]; then
       consecutive_ok=$((consecutive_ok + 1))
-      log "Cluster health: $health_status ($consecutive_ok/$required_ok)"
+      log "Cluster health: HEALTH_OK ($consecutive_ok/$required_ok)"
       if (( consecutive_ok >= required_ok )); then
         log "Cluster reached HEALTH_OK after $consecutive_ok consecutive checks"
         return 0
       fi
+    elif [[ "$health_result" == OK_SCRUB_WARN:* ]]; then
+      consecutive_ok=$((consecutive_ok + 1))
+      local scrub_detail="${health_result#OK_SCRUB_WARN:}"
+      log "Cluster health: HEALTH_WARN (benign: ${scrub_detail}) - continuing ($consecutive_ok/$required_ok)"
+      if (( consecutive_ok >= required_ok )); then
+        log "Cluster healthy (ignoring scrub warnings) after $consecutive_ok consecutive checks"
+        return 0
+      fi
     else
       if (( consecutive_ok > 0 )); then
-        log_warn "Health dropped from OK: $health_status (resetting count)"
+        log_warn "Health not OK: $health_result (resetting count)"
       else
-        log "Cluster health: $health_status"
+        log "Cluster health: $health_result"
       fi
       consecutive_ok=0
     fi
@@ -451,6 +478,13 @@ fi
 
 # Start llama animation
 if $LLAMA; then
+  # Reserve the bottom 13 rows for the llama by setting a scroll region.
+  # Main output scrolls only in the top portion; the llama area stays fixed.
+  llama_term_height=$(tput lines 2>/dev/null || echo 24)
+  llama_scroll_end=$((llama_term_height - 13))
+  printf '\e[1;%dr' "$llama_scroll_end"
+  tput cup "$((llama_scroll_end - 1))" 0 2>/dev/null || true
+
   llama_walk "$STATUS_FILE" "$DRY_RUN" &
   ANIM_PID=$!
 fi
@@ -552,17 +586,21 @@ CHECK
   log_ok "Completed update of ${node} (${current}/${total})"
 done
 
-# -- Stop animation --
+# -- Stop animation and restore terminal --
 if [[ -n "${ANIM_PID:-}" ]]; then
   kill "$ANIM_PID" 2>/dev/null || true
   wait "$ANIM_PID" 2>/dev/null || true
   ANIM_PID=""
   tput cnorm 2>/dev/null || true
+  # Clear the llama area
   anim_bottom=$(tput lines 2>/dev/null || echo 24)
   for i in $(seq 1 12); do
     tput cup $((anim_bottom - i)) 0 2>/dev/null || true
     printf "\e[K"
   done
+  # Restore full scroll region
+  printf '\e[r' 2>/dev/null || true
+  tput cup "$((anim_bottom - 13))" 0 2>/dev/null || true
 fi
 
 echo
