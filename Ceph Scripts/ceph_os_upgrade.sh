@@ -288,16 +288,23 @@ unset_ceph_flags() {
 }
 
 # ---------- SSH pre-flight ----------
+# Always tests real SSH connectivity, even in dry-run, and verifies
+# the remote user can run apt-get and read reboot-required.
 check_ssh() {
   local node="$1"
-  if $DRY_RUN; then
-    log "Would verify SSH to ${node}"
-    return 0
-  fi
   if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${node}" 'true' 2>/dev/null; then
-    log_err "Cannot SSH to ${node}"
+    log_err "Cannot SSH to ${node} as ${SSH_USER}"
     return 1
   fi
+  log "SSH to ${node}: connected"
+  local priv_check=""
+  priv_check=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${node}" \
+    'whoami && apt-get --version >/dev/null 2>&1 && echo APT_OK || echo APT_FAIL' 2>/dev/null) || true
+  if [[ "$priv_check" != *"APT_OK"* ]]; then
+    log_err "${node}: apt-get not available or not permitted for ${SSH_USER}"
+    return 1
+  fi
+  log "SSH to ${node}: privileges OK"
 }
 
 # ---------- Wait for node to return after reboot ----------
@@ -456,16 +463,12 @@ fi
 log_ok "SSH connectivity verified for all nodes"
 
 # Pre-flight: Ceph cluster reachable
-if ! $DRY_RUN; then
-  log "Pre-flight: checking Ceph cluster connectivity..."
-  if ! ceph -s &>/dev/null; then
-    log_err "Cannot reach Ceph cluster (ceph -s failed). Check admin keyring."
-    exit 1
-  fi
-  log_ok "Ceph cluster is reachable"
-else
-  log "Would verify Ceph cluster connectivity"
+log "Pre-flight: checking Ceph cluster connectivity..."
+if ! ceph -s &>/dev/null; then
+  log_err "Cannot reach Ceph cluster (ceph -s failed). Check admin keyring."
+  exit 1
 fi
+log_ok "Ceph cluster is reachable"
 echo
 
 # Confirm before starting
