@@ -23,6 +23,8 @@ SSH_USER="root"
 REBOOT_WAIT=300
 EXPECTED_OSDS=""
 LOG_FILE="${LOG_FILE:-/var/log/ceph_update.log}"
+OSD_WAIT_TIMEOUT="${OSD_WAIT_TIMEOUT:-7200}"        # max seconds waiting for OSDs up/in
+HEALTH_WAIT_TIMEOUT="${HEALTH_WAIT_TIMEOUT:-7200}"  # max seconds waiting for cluster health
 
 FLAGS=(noout norebalance norecover)
 
@@ -31,6 +33,7 @@ FLAGS_SET=false
 STATUS_FILE=""
 ANIM_PID=""
 ALT_SCREEN=false
+LOCAL_BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
 
 # ---------- Colors ----------
 RESET="\e[0m"
@@ -101,15 +104,20 @@ Options:
   --yes, -y                 Skip interactive confirmations
   --ssh-user USER           SSH user for remote commands (default: root)
   --expected-osds N         Expected OSD count (default: auto-detect)
-  --reboot-wait SECS        Max seconds to wait after reboot (default: 300)
+  --reboot-wait SECS        Max seconds to wait for a node to reboot and return (default: 300)
   -h, --help                Show this help
+
+Environment:
+  LOG_FILE                  Log file path (default: /var/log/ceph_update.log)
+  OSD_WAIT_TIMEOUT          Max seconds to wait for OSDs up/in (default: 7200)
+  HEALTH_WAIT_TIMEOUT       Max seconds to wait for cluster health (default: 7200)
 
 Examples:
   $(basename "$0") --nodes ceph01,ceph02,ceph03 --llama
   $(basename "$0") --nodes ceph01,ceph02,ceph03 --execute --yes
   $(basename "$0") --nodes ceph01,ceph02,ceph03 --execute --expected-osds 12
 EOF
-  exit 0
+  exit "${1:-0}"
 }
 
 # ---------- Argument parsing ----------
@@ -123,19 +131,36 @@ while [[ $# -gt 0 ]]; do
     --ssh-user)      SSH_USER="${2:?--ssh-user requires a value}"; shift 2 ;;
     --expected-osds) EXPECTED_OSDS="${2:?--expected-osds requires a value}"; shift 2 ;;
     --reboot-wait)   REBOOT_WAIT="${2:?--reboot-wait requires a value}"; shift 2 ;;
-    -h|--help)       usage ;;
-    *)               printf "${RED}Unknown option: %s${RESET}\n" "$1"; usage ;;
+    -h|--help)       usage 0 ;;
+    *)               printf "${RED}Unknown option: %s${RESET}\n" "$1"; usage 1 ;;
   esac
 done
 
 if [[ ${#NODES[@]} -eq 0 ]]; then
   printf "${RED}Error: --nodes is required${RESET}\n"
-  usage
+  usage 1
 fi
 
 # ---------- IPC for llama animation ----------
 STATUS_FILE=$(mktemp "${TMPDIR:-/tmp}/ceph-upgrade-status.XXXXXX")
 echo "Initializing..." > "$STATUS_FILE"
+
+# ---------- Remote upgrade script (shared by both passes) ----------
+# Runs on each node: update, dist-upgrade, then reboot only if required.
+read -r -d '' REMOTE_UPGRADE <<'REMOTE' || true
+set -e
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=l
+apt-get update
+yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
+                 -o Dpkg::Options::="--force-confold" dist-upgrade
+if [ -f /var/run/reboot-required ]; then
+  echo "Reboot required by: $(cat /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
+  reboot
+else
+  echo "No reboot required; skipping reboot for this node"
+fi
+REMOTE
 
 # ---------- Static llama (original art) ----------
 draw_llama_banner() {
@@ -282,32 +307,71 @@ confirm() {
 
 # ---------- Ceph flag management ----------
 set_ceph_flags() {
-  for flag in "${FLAGS[@]}"; do
-    if $DRY_RUN; then
+  if $DRY_RUN; then
+    for flag in "${FLAGS[@]}"; do
       log "Would: ceph osd set $flag"
-    else
-      ceph osd set "$flag"
-      log "Set flag $flag"
-    fi
-  done
+    done
+    FLAGS_SET=true
+    return 0
+  fi
+  # Mark before setting so the cleanup trap restores a partial set too
   FLAGS_SET=true
+  for flag in "${FLAGS[@]}"; do
+    if ! ceph osd set "$flag"; then
+      log_err "Failed to set Ceph flag '${flag}' - aborting before touching any node"
+      exit 1
+    fi
+    log "Set flag $flag"
+  done
 }
 
 unset_ceph_flags() {
-  for flag in "${FLAGS[@]}"; do
-    if $DRY_RUN; then
+  if $DRY_RUN; then
+    for flag in "${FLAGS[@]}"; do
       log "Would: ceph osd unset $flag"
-    else
-      ceph osd unset "$flag"
-      log "Unset flag $flag"
+    done
+    FLAGS_SET=false
+    return 0
+  fi
+  for flag in "${FLAGS[@]}"; do
+    if ! ceph osd unset "$flag"; then
+      # Keep FLAGS_SET=true so the cleanup trap retries on exit
+      log_err "Failed to unset Ceph flag '${flag}' - aborting (cleanup will retry)"
+      exit 1
     fi
+    log "Unset flag $flag"
   done
   FLAGS_SET=false
 }
 
+# ---------- Boot id helpers ----------
+# /proc/sys/kernel/random/boot_id is unique per boot, so comparing it
+# before and after an upgrade reliably detects whether a reboot happened.
+get_boot_id() {
+  local node="$1"
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${node}" \
+    'cat /proc/sys/kernel/random/boot_id' 2>/dev/null
+}
+
+# ---------- Self-host guard ----------
+# Never allow the node running this script into the upgrade list: it would
+# reboot itself mid-run with maintenance flags still set.
+is_this_host() {
+  local node="${1,,}" name
+  for name in "${LOCAL_NAMES[@]}"; do
+    name="${name,,}"
+    [[ -z "$name" ]] && continue
+    if [[ "$node" == "$name" || "${node%%.*}" == "${name%%.*}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ---------- SSH pre-flight ----------
-# Always tests real SSH connectivity, even in dry-run, and verifies
-# the remote user can run apt-get and read reboot-required.
+# Always tests real SSH connectivity, even in dry-run, verifies the remote
+# user can run apt-get, and confirms the node is not the local host by
+# comparing boot ids (catches IPs/aliases the hostname check misses).
 check_ssh() {
   local node="$1"
   if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${node}" 'true' 2>/dev/null; then
@@ -315,6 +379,12 @@ check_ssh() {
     return 1
   fi
   log "SSH to ${node}: connected"
+  local remote_boot_id=""
+  remote_boot_id=$(get_boot_id "$node") || true
+  if [[ -n "$remote_boot_id" && -n "$LOCAL_BOOT_ID" && "$remote_boot_id" == "$LOCAL_BOOT_ID" ]]; then
+    log_err "${node} is this host (same boot id) - run the script from a node that is not being upgraded"
+    return 1
+  fi
   local priv_check=""
   priv_check=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${node}" \
     'whoami && apt-get --version >/dev/null 2>&1 && echo APT_OK || echo APT_FAIL' 2>/dev/null) || true
@@ -325,11 +395,32 @@ check_ssh() {
   log "SSH to ${node}: privileges OK"
 }
 
-# ---------- Wait for node to return after reboot ----------
-wait_for_node() {
+# ---------- Run one apt update + dist-upgrade pass on a node ----------
+# Output always goes to $LOG_FILE; without --llama it is echoed to the
+# terminal too. Returns the ssh exit code: 255 usually just means the
+# connection dropped because the node started rebooting; anything else
+# non-zero is a real remote failure (set -e aborts the remote script).
+run_upgrade_pass() {
+  local node="$1"
+  local rc=0
+  if $LLAMA; then
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s \
+      <<<"$REMOTE_UPGRADE" >>"$LOG_FILE" 2>&1 || rc=$?
+  else
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s \
+      <<<"$REMOTE_UPGRADE" 2>&1 | tee -a "$LOG_FILE" || rc=$?
+  fi
+  return "$rc"
+}
+
+# ---------- Wait for node to return after an upgrade pass ----------
+# Reboot-aware: succeeds when the boot id has changed (node rebooted and
+# is back), or when the node is reachable on the same boot with no reboot
+# pending. Avoids the race where SSH still answers because the node has
+# not actually gone down yet.
+wait_for_node_after_upgrade() {
   local host="$1"
-  local max_attempts=$(( REBOOT_WAIT / 10 ))
-  (( max_attempts < 1 )) && max_attempts=1
+  local pre_boot_id="$2"
 
   if $DRY_RUN; then
     sleep 2
@@ -337,15 +428,32 @@ wait_for_node() {
     return 0
   fi
 
-  for (( i=1; i<=max_attempts; i++ )); do
-    if ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${host}" 'true' 2>/dev/null; then
-      log "${host} reachable via SSH"
-      return 0
+  local start=$SECONDS
+  while (( SECONDS - start < REBOOT_WAIT )); do
+    local cur_boot_id=""
+    cur_boot_id=$(get_boot_id "$host") || true
+    if [[ -n "$cur_boot_id" ]]; then
+      if [[ -n "$pre_boot_id" && "$cur_boot_id" != "$pre_boot_id" ]]; then
+        log "${host} rebooted and is back (boot id changed)"
+        return 0
+      fi
+      local rr_rc=0
+      ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${host}" \
+        'test -f /var/run/reboot-required' 2>/dev/null || rr_rc=$?
+      if (( rr_rc == 1 )); then
+        log "${host} reachable; no reboot was required"
+        return 0
+      elif (( rr_rc == 0 )); then
+        log "Waiting for ${host} to reboot (reboot still pending)..."
+      else
+        log "Waiting for ${host} (connection unstable)..."
+      fi
+    else
+      log "Waiting for ${host} to become reachable..."
     fi
-    log "Waiting for ${host} to become reachable... (${i}/${max_attempts})"
     sleep 10
   done
-  log_warn "${host} did not become reachable within ${REBOOT_WAIT}s"
+  log_err "${host} did not come back within ${REBOOT_WAIT}s"
   return 1
 }
 
@@ -357,7 +465,8 @@ wait_for_osds() {
     return 0
   fi
 
-  while true; do
+  local start=$SECONDS
+  while (( SECONDS - start < OSD_WAIT_TIMEOUT )); do
     local counts=""
     counts=$(ceph osd stat -f json 2>/dev/null | \
       python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('num_osds',0), d.get('num_up_osds',0), d.get('num_in_osds',0))" 2>/dev/null) || true
@@ -376,6 +485,8 @@ wait_for_osds() {
     log "Waiting for OSDs: total=$total up=$up in=$num_in (need $expected)"
     sleep 10
   done
+  log_err "Timed out after ${OSD_WAIT_TIMEOUT}s waiting for OSDs up/in"
+  return 1
 }
 
 # ---------- Wait for consecutive HEALTH_OK (JSON via python3) ----------
@@ -391,7 +502,8 @@ wait_for_health() {
     return 0
   fi
 
-  while true; do
+  local start=$SECONDS
+  while (( SECONDS - start < HEALTH_WAIT_TIMEOUT )); do
     local health_result=""
     health_result=$(ceph status -f json 2>/dev/null | python3 -c "
 import sys, json
@@ -436,6 +548,8 @@ else:
     fi
     sleep 10
   done
+  log_err "Timed out after ${HEALTH_WAIT_TIMEOUT}s waiting for cluster health"
+  return 1
 }
 
 # =====================================================
@@ -460,6 +574,23 @@ if ! $DRY_RUN; then
   printf "%b\n" "${WHITE}  Log:   ${LOG_FILE}${RESET}"
 fi
 echo
+
+# Pre-flight: log file writable (live runs log every step + apt output)
+if ! $DRY_RUN; then
+  if ! touch "$LOG_FILE" 2>/dev/null || [[ ! -w "$LOG_FILE" ]]; then
+    printf "%b\n" "${RED} [ERROR] Cannot write to log file ${LOG_FILE} (run with sufficient privileges or set LOG_FILE=/path/you/can/write)${RESET}"
+    exit 1
+  fi
+fi
+
+# Pre-flight: refuse to include the host running this script
+mapfile -t LOCAL_NAMES < <({ hostname; hostname -s; hostname -f; } 2>/dev/null | sort -u)
+for node in "${NODES[@]}"; do
+  if is_this_host "$node"; then
+    log_err "Node list includes this host (${node}). Run the script from a node that is not being upgraded."
+    exit 1
+  fi
+done
 
 # Pre-flight: SSH connectivity
 log "Pre-flight: checking SSH connectivity..."
@@ -523,89 +654,56 @@ for node in "${NODES[@]}"; do
   log "[${current}/${total}] ${node}: setting Ceph maintenance flags"
   set_ceph_flags
 
-  # -- Update + reboot via SSH heredoc --
+  # -- Update + reboot via SSH --
   log "[${current}/${total}] ${node}: running apt update + dist-upgrade"
+  pre_boot_id=""
   if $DRY_RUN; then
     log "Would SSH to ${SSH_USER}@${node} and run:"
     log "  apt-get update"
     log "  apt-get dist-upgrade (NEEDRESTART_MODE=l, --force-confdef/confold)"
     log "  reboot if /var/run/reboot-required exists"
   else
-    ssh_rc=0
-    if $LLAMA; then
-      ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s >>"$LOG_FILE" 2>&1 <<'REMOTE' || ssh_rc=$?
-        set -e
-        export DEBIAN_FRONTEND=noninteractive
-        export NEEDRESTART_MODE=l
-        apt-get update
-        yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
-                         -o Dpkg::Options::="--force-confold" dist-upgrade
-        if [ -f /var/run/reboot-required ]; then
-          echo "Reboot required by: $(cat /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
-          reboot
-        else
-          echo "No reboot required; skipping reboot for this node"
-        fi
-REMOTE
-    else
-      ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s <<'REMOTE' || ssh_rc=$?
-        set -e
-        export DEBIAN_FRONTEND=noninteractive
-        export NEEDRESTART_MODE=l
-        apt-get update
-        yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
-                         -o Dpkg::Options::="--force-confold" dist-upgrade
-        if [ -f /var/run/reboot-required ]; then
-          echo "Reboot required by: $(cat /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
-          reboot
-        else
-          echo "No reboot required; skipping reboot for this node"
-        fi
-REMOTE
+    pre_boot_id=$(get_boot_id "$node") || true
+    if [[ -z "$pre_boot_id" ]]; then
+      log_warn "${node}: could not read boot id; falling back to reboot-required detection only"
     fi
-    log "Update command sent to ${node} (ssh exit code: ${ssh_rc})"
+    ssh_rc=0
+    run_upgrade_pass "$node" || ssh_rc=$?
+    if (( ssh_rc != 0 && ssh_rc != 255 )); then
+      log_err "${node}: apt upgrade failed (remote exit code ${ssh_rc}); see ${LOG_FILE}. Aborting."
+      exit 1
+    fi
+    log "Upgrade pass finished on ${node} (ssh exit code: ${ssh_rc})"
   fi
 
-  # -- Wait for node to return --
+  # -- Wait for node to return (boot-id aware, no fixed-sleep race) --
   log "[${current}/${total}] ${node}: waiting for host to return"
-  if ! $DRY_RUN; then sleep 5; fi
-  wait_for_node "$node" || { log_err "${node} did not return after update; aborting"; exit 1; }
+  wait_for_node_after_upgrade "$node" "$pre_boot_id" || { log_err "${node} did not return after update; aborting"; exit 1; }
 
   # -- Wait for OSDs up/in --
   log "[${current}/${total}] ${node}: waiting for all OSDs up/in"
-  wait_for_osds
+  wait_for_osds || exit 1
 
   # -- Stabilization pause + recheck --
   log "[${current}/${total}] ${node}: pausing for OSD state to stabilize"
   if $DRY_RUN; then sleep 2; else sleep 20; fi
-  wait_for_osds
+  wait_for_osds || exit 1
 
-  # -- Second update pass (catches packages needing post-reboot install) --
+  # -- Second update pass (catches packages needing post-reboot install; --
+  # -- reboots again if that pass requires it) --
   log "[${current}/${total}] ${node}: second update pass"
   if $DRY_RUN; then
     log "Would run second apt-get update + dist-upgrade on ${node}"
   else
-    wait_for_node "$node" || { log_err "${node} not reachable for post-reboot check; aborting"; exit 1; }
-    log "Checking for remaining updates on ${node}"
-    if $LLAMA; then
-      ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s >>"$LOG_FILE" 2>&1 <<'CHECK'
-        set -e
-        export DEBIAN_FRONTEND=noninteractive
-        export NEEDRESTART_MODE=l
-        apt-get update
-        yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
-                         -o Dpkg::Options::="--force-confold" dist-upgrade
-CHECK
-    else
-      ssh -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${node}" bash -s <<'CHECK'
-        set -e
-        export DEBIAN_FRONTEND=noninteractive
-        export NEEDRESTART_MODE=l
-        apt-get update
-        yes '' | apt-get -y -o Dpkg::Options::="--force-confdef" \
-                         -o Dpkg::Options::="--force-confold" dist-upgrade
-CHECK
+    pre_boot_id=$(get_boot_id "$node") || true
+    ssh_rc=0
+    run_upgrade_pass "$node" || ssh_rc=$?
+    if (( ssh_rc != 0 && ssh_rc != 255 )); then
+      log_err "${node}: second upgrade pass failed (remote exit code ${ssh_rc}); see ${LOG_FILE}. Aborting."
+      exit 1
     fi
+    wait_for_node_after_upgrade "$node" "$pre_boot_id" || { log_err "${node} did not return after second pass; aborting"; exit 1; }
+    wait_for_osds || exit 1
   fi
 
   # -- Unset maintenance flags --
@@ -614,12 +712,12 @@ CHECK
 
   # -- Wait for cluster health (3 consecutive OK) --
   log "[${current}/${total}] ${node}: waiting for cluster to become healthy"
-  wait_for_health 3
+  wait_for_health 3 || exit 1
 
   # -- Extra verification after pause --
   log "[${current}/${total}] ${node}: verifying health persists"
   if $DRY_RUN; then sleep 2; else sleep 20; fi
-  wait_for_health 2
+  wait_for_health 2 || exit 1
 
   log_ok "Completed update of ${node} (${current}/${total})"
 done
